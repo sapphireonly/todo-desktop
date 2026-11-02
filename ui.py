@@ -28,6 +28,8 @@ class TodoApp:
         self._drag_y = 0
         self._resize_dir = None
         self._resize_start = None
+        self._collapsed = False          # 是否处于手动折叠态
+        self._expanded_geo = None        # 折叠前记住的 (w, h, x, y)，展开时还原
 
         self._build_widgets()
         self._build_resize_grips()
@@ -38,20 +40,29 @@ class TodoApp:
 
     # ---------- 窗口定位与拖动 ----------
     def _place_window(self):
-        geo = load_geometry()
-        if geo:
-            self.root.geometry(f"{geo[0]}x{geo[1]}+{geo[2]}+{geo[3]}")
-            return
         self.root.update_idletasks()
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        x = sw - WINDOW_WIDTH - 20
-        y = sh - WINDOW_HEIGHT - 20
-        self.root.geometry(f"+{x}+{y}")
+        geo = load_geometry()
+        if geo and len(geo) == 4:
+            # 钳制到最小尺寸，防止历史存档（如自动隐藏残留的 40px 高度）压没列表区
+            w = max(MIN_WIDTH, int(geo[0]))
+            h = max(MIN_HEIGHT, int(geo[1]))
+            x = int(geo[2])
+            y = int(geo[3])
+            # 若窗口整体跑出屏幕（换显示器/存档位置失效），回落到右下角
+            if x + w <= 0 or y + h <= 0 or x >= sw or y >= sh:
+                x = sw - w - 20
+                y = sh - h - 20
+        else:
+            w, h = WINDOW_WIDTH, WINDOW_HEIGHT
+            x = sw - w - 20
+            y = sh - h - 20
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
 
     def _start_drag(self, event):
-        # 点 tab 按钮 / 关闭键时不启动拖动，交给各自的点击逻辑
-        if event.widget in (self.tab_active, self.tab_done, self.close_btn):
+        # 点 tab 按钮 / 折叠键 / 关闭键时不启动拖动，交给各自的点击逻辑
+        if event.widget in (self.tab_active, self.tab_done, self.collapse_btn, self.close_btn):
             return
         self._drag_x = event.x_root
         self._drag_y = event.y_root
@@ -158,6 +169,14 @@ class TodoApp:
         self.close_btn.pack(side="right", padx=2)
         self.close_btn.bind("<Button-3>", self._show_menu)
 
+        # 折叠/展开按钮（点击切换：收起内容 / 恢复内容），位于关闭键左侧
+        self.collapse_btn = tk.Button(
+            self.tab_bar, text="▾", bg=BG_COLOR, fg=FG_COLOR, bd=0,
+            font=(FONT_FAMILY, 12), width=3, command=self._toggle_collapse,
+        )
+        self.collapse_btn.pack(side="right", padx=2)
+        self.collapse_btn.bind("<Button-3>", self._show_menu)
+
         self.tab_active = tk.Button(
             self.tab_bar, text="待办", bg=BG_COLOR, bd=0,
             font=(FONT_FAMILY, FONT_SIZE), command=lambda: self.switch_page("active"),
@@ -176,13 +195,13 @@ class TodoApp:
         self.tab_bar.bind("<Button-3>", self._show_menu)
 
         # 可滚动列表区
-        list_container = tk.Frame(self.body, bg=BG_COLOR)
-        list_container.pack(fill="both", expand=True, padx=8, pady=(4, 4))
+        self.list_container = tk.Frame(self.body, bg=BG_COLOR)
+        self.list_container.pack(fill="both", expand=True, padx=8, pady=(4, 4))
 
-        self.canvas = tk.Canvas(list_container, bg=BG_COLOR, highlightthickness=0)
+        self.canvas = tk.Canvas(self.list_container, bg=BG_COLOR, highlightthickness=0)
         # Canvas 的 "units" 默认约 1 像素，滚轮会几乎不动；设 30px/格让滚动明显
         self.canvas.configure(yscrollincrement=30)
-        self.scrollbar = tk.Scrollbar(list_container, orient="vertical",
+        self.scrollbar = tk.Scrollbar(self.list_container, orient="vertical",
                                       command=self.canvas.yview)
         self.scrollable_frame = tk.Frame(self.canvas, bg=BG_COLOR)
         self.scrollable_frame.bind(
@@ -197,23 +216,47 @@ class TodoApp:
         self.scrollable_frame.bind("<MouseWheel>", self._on_mousewheel)
 
         # 底部：输入框（已完成页隐藏，显示提示）
-        bottom = tk.Frame(self.body, bg=BG_COLOR)
-        bottom.pack(fill="x", side="bottom", padx=8, pady=(0, 8))
+        self.bottom = tk.Frame(self.body, bg=BG_COLOR)
+        self.bottom.pack(fill="x", side="bottom", padx=8, pady=(0, 8))
         self.entry = tk.Entry(
-            bottom, bg=ENTRY_BG, fg=FG_COLOR, insertbackground=FG_COLOR,
+            self.bottom, bg=ENTRY_BG, fg=FG_COLOR, insertbackground=FG_COLOR,
             bd=0, font=(FONT_FAMILY, FONT_SIZE),
         )
         self.entry.pack(fill="x", ipady=6)
         self.entry.bind("<Return>", lambda e: self.add_item())
         self.entry.focus_set()
         self.done_hint = tk.Label(
-            bottom, text="已完成事项", bg=ENTRY_BG, fg=DONE_FG,
+            self.bottom, text="已完成事项", bg=ENTRY_BG, fg=DONE_FG,
             font=(FONT_FAMILY, FONT_SIZE),
         )
         self.done_hint.pack_forget()
 
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    # ---------- 手动折叠 / 展开 ----------
+    def _toggle_collapse(self):
+        if not self._collapsed:
+            # 折叠：记住当前尺寸位置，仅保留选项卡条
+            self._expanded_geo = (
+                self.root.winfo_width(), self.root.winfo_height(),
+                self.root.winfo_x(), self.root.winfo_y(),
+            )
+            self.list_container.pack_forget()
+            self.bottom.pack_forget()
+            x, y = self._expanded_geo[2], self._expanded_geo[3]
+            self.root.geometry(f"{self._expanded_geo[0]}x40+{x}+{y}")
+            self.collapse_btn.configure(text="▸")
+            self._collapsed = True
+        else:
+            # 展开：还原尺寸位置并重新显示内容
+            w, h, x, y = self._expanded_geo
+            self.root.geometry(f"{w}x{h}+{x}+{y}")
+            self.list_container.pack(fill="both", expand=True, padx=8, pady=(4, 4))
+            self.bottom.pack(fill="x", side="bottom", padx=8, pady=(0, 8))
+            self.collapse_btn.configure(text="▾")
+            self._collapsed = False
+            self.render()
 
     # ---------- 页面切换 ----------
     def switch_page(self, page):
@@ -340,10 +383,15 @@ class TodoApp:
     # ---------- 退出 ----------
     def save(self):
         save_todos(self.todos)
-        save_geometry(
-            self.root.winfo_width(), self.root.winfo_height(),
-            self.root.winfo_x(), self.root.winfo_y(),
-        )
+        # 折叠态下窗口实际高度为 40，保存时还原为展开尺寸，避免下次启动仍是折叠
+        if self._collapsed and self._expanded_geo:
+            w, h, x, y = self._expanded_geo
+        else:
+            w = self.root.winfo_width()
+            h = self.root.winfo_height()
+            x = self.root.winfo_x()
+            y = self.root.winfo_y()
+        save_geometry(w, h, x, y)
 
     def on_close(self):
         self.save()
