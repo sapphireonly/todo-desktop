@@ -1,0 +1,5 @@
+# 运行时无需任何第三方库：GUI 使用 Python 标准库 tkinter。
+# 仅需 Python 3.8+（推荐 3.10+）。
+
+# 打包为单个 exe 时需要（开发/发布用，非运行必需）：
+pyinstaller>=6.0

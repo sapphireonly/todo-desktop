@@ -1,0 +1,10 @@
+# 打包 / 构建产物（由 PyInstaller 生成，无需纳入版本控制）
+__pycache__/
+build/
+out/
+dist/
+*.spec
+*.pyc
+
+# 本地运行时数据（你的待办清单与窗口位置，含个人隐私，勿上传）
+*.json
